@@ -1,0 +1,23 @@
+# Датасет и тестовые видео НЕ коммитим (условия хакатона)
+open/
+data/
+*.mov
+*.mp4
+
+# Веса моделей
+weights/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Окружение
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Артефакты
+runs/
+eval_out/
+.ipynb_checkpoints/
