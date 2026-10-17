@@ -17,7 +17,14 @@ Answer ONLY JSON: {"cashier_at_desk": true/false}"""
 DESK = """This is a zoomed crop of a bank cashier's desk from a ceiling CCTV camera. The cashier has left.
 Fixed equipment that does NOT count: banknote counting machine, laptop, desk telephone, cables.
 What else lies on the desk surface? Answer ONLY JSON:
-{"banknotes_or_cash": true/false, "cash_bag_or_sack": true/false, "personal_bag_or_clothes": true/false}"""
+{"banknotes_or_cash": true/false, "coin_rolls_or_wrapped_cash": true/false, "cash_bag_or_sack": true/false,
+ "ledger_or_cash_documents": true/false, "personal_bag_or_clothes": true/false}"""
+
+CLIENT_SIDE = """Two frames from a ceiling CCTV camera, cropped around a bank cashier's desk, a few seconds after a client left.
+The cashier is marked with the box "C". The client's side of the desk is the side opposite the cashier.
+Answer ONLY JSON:
+{"banknotes_on_client_side": <banknotes lying on the desk on the client's side, not in anyone's hands>,
+ "cashier_counts_banknotes": <the cashier is counting banknotes or feeding them into the counting machine>}"""
 
 SCREEN = """A zoomed crop of a laptop on a bank cashier's desk from a ceiling CCTV camera. The cashier has left the desk.
 What does the laptop screen show?

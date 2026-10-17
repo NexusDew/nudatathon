@@ -49,6 +49,7 @@ def _get_detector():
 
 def _step_for(duration: float) -> float:
     """Шаг скана: короткие видео — подробнее, длинные — реже, чтобы уложиться в бюджет времени."""
+    # Шаг 2 с для коротких видео пробовали (v6): добавляет шум, точность падает с 0.71 до 0.67
     return 3.0 if duration <= 60 else 4.0
 
 
@@ -223,9 +224,10 @@ def _check_departure(v: _Video, scans: list[_Scan], i: int, j: int, step: float,
     for t in checks:
         a = _ask(P.DESK, [_crop(v.at(t), surf)])
         # Сумку модель часто называет «личной», даже если это инкассаторская — без кассира на столе любая сумка подозрительна
-        for k in ("banknotes_or_cash", "cash_bag_or_sack", "personal_bag_or_clothes"):
-            if a.get(k) and k not in found:
-                found[k] = t
+        for k in ("banknotes_or_cash", "coin_rolls_or_wrapped_cash", "cash_bag_or_sack",
+                  "ledger_or_cash_documents", "personal_bag_or_clothes"):
+            if a.get(k):
+                found.setdefault(k, t)
         # Экран: горящий экран блокировки — норма, нарушение — открытое рабочее приложение
         if "laptop_screen_lit" not in found:
             lb = _laptop_box(v.at(t), surf)
@@ -233,7 +235,10 @@ def _check_departure(v: _Video, scans: list[_Scan], i: int, j: int, step: float,
                 found["laptop_screen_lit"] = t
 
     out = []
-    kinds = (("banknotes_or_cash", "наличные денежные средства"), ("cash_bag_or_sack", "инкассаторская сумка"),
+    kinds = (("banknotes_or_cash", "наличные денежные средства"),
+             ("coin_rolls_or_wrapped_cash", "упакованные наличные (рулоны/пачки)"),
+             ("cash_bag_or_sack", "инкассаторская сумка"),
+             ("ledger_or_cash_documents", "кассовые документы/журнал"),
              ("personal_bag_or_clothes", "сумка"))
     valuables = [name for k, name in kinds if k in found]
     if "инкассаторская сумка" in valuables and "сумка" in valuables:
@@ -295,6 +300,59 @@ def _is_cashier(box, persons, anchor) -> bool:
     return d < (box[3] - box[1])  # один человек у стола: кассир, если он примерно на месте кассира
 
 
+# --- уход клиента: наличные на его стороне стола, пересчёт после ухода ---
+
+def _client_events(v: _Video, scans: list[_Scan], step: float, wp, anchor) -> list[Violation]:
+    """Клиент ушёл, кассир остался: смотрим стол через несколько секунд.
+
+    - банкноты лежат на стороне клиента дольше пары секунд → cash_left_in_client_zone;
+    - кассир пересчитывает/закладывает в счётчик деньги уже без клиента → cash_count_without_client.
+    """
+    if anchor is None:
+        return []
+    has_client = [any(not _is_cashier(b, s.persons, anchor) for b, _ in s.persons) for s in scans]
+    out: list[Violation] = []
+    for j in range(len(scans) - 1):
+        # конец визита: клиент был в двух сканах подряд, в следующем его нет, кассир на месте
+        if not (has_client[j] and (j == 0 or has_client[j - 1]) and not has_client[j + 1] and scans[j + 1].present):
+            continue
+        t_dep = (scans[j].t + scans[j + 1].t) / 2
+        checks = [t for t in (t_dep + 1.5, t_dep + 4.5) if t < v.dur - 1.5]
+        if not checks:
+            continue
+        answers = [_ask(P.CLIENT_SIDE, [_marked_cashier(v, t, wp, anchor), _marked_cashier(v, t + 1.5, wp, anchor)])
+                   for t in checks]
+        log.debug("client left %.1f -> %s", t_dep, answers)
+        if all(a.get("banknotes_on_client_side") for a in answers):
+            t_seen = checks[-1]
+            out.append(Violation(
+                "cash_left_in_client_zone", t_dep,
+                f"Около {_fmt(t_dep)} клиент уходит от стола. На кадрах {_fmt(checks[0])}–{_fmt(t_seen)} "
+                f"на стороне клиента остаются лежать банкноты, а не убраны кассиром.",
+                _evidence(v, [(t_dep, None), (t_seen, None), (t_seen, wp)]),
+            ))
+        if answers[0].get("cashier_counts_banknotes"):
+            out.append(Violation(
+                "cash_count_without_client", checks[0],
+                f"Около {_fmt(t_dep)} клиент уходит от стола, а на кадре {_fmt(checks[0])} кассир пересчитывает "
+                f"наличные или закладывает их в счётчик уже без клиента.",
+                _evidence(v, [(t_dep, None), (checks[0], None), (checks[0], wp)]),
+            ))
+    return out
+
+
+def _marked_cashier(v: _Video, t: float, wp, anchor) -> np.ndarray:
+    """Фрагмент рабочего места с рамкой «C» вокруг кассира — чтобы модель знала, чья сторона стола клиентская."""
+    f = v.at(t).copy()
+    people = [d.box for d in _get_detector()([f])[0] if d.cls == "person" and d.score >= 0.5]
+    if people:
+        b = min(people, key=lambda p: np.hypot(*np.subtract(_center(p), anchor)))
+        x1, y1, x2, y2 = map(int, b)
+        cv2.rectangle(f, (x1, y1), (x2, y2), (0, 200, 255), 3)
+        cv2.putText(f, "C", (x1 + 5, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 200, 255), 3)
+    return _crop(f, wp)
+
+
 # --- телефон, еда, напитки ---
 
 def _candidates(scans: list[_Scan], kind: str, anchor=None) -> list[tuple[float, tuple | None, bool]]:
@@ -352,6 +410,7 @@ def _hand_events(v: _Video, scans: list[_Scan], step: float, wp) -> list[Violati
                 f"С {_fmt(t)} кассир {what} на рабочем месте, где совершаются операции с наличными.",
                 _evidence(v, [(t, None), (t, box or wp)]),
             ))
+    out += _client_events(v, scans, step, wp, anchor)
     return out
 
 
@@ -364,6 +423,17 @@ def _verify(v: _Video, ep, wp, prompt: str, ok, person_ok=None):
 
     for t, box, strong in ordered[:3]:
         b = box or wp
+        if not strong and person_ok is not None:
+            # Слабая подсказка (только общий вид): событие могло начаться между сканами — уплотняем 3 с вперёд
+            ts = [t + k * 0.75 for k in range(1, 5) if t + k * 0.75 < v.dur - 1]
+            crops = [_crop(v.at(t2), b, PERSON_SIDE) for t2 in ts]
+            with ThreadPoolExecutor(VLM_PARALLEL) as pool:
+                answers = list(pool.map(lambda c: _ask(P.PERSON, [c]), crops))
+            log.debug("densify %.1f box=%s -> %s", t, box, answers)
+            hits = [(t2, a2) for t2, a2 in zip(ts, answers) if person_ok(a2)]
+            if hits:  # общий вид + крупный план человека — два независимых сигнала
+                return hits[0][0], box, hits[0][1]
+            continue
         if strong and person_ok is not None:
             # Фрагмент человека уже сказал «да» — подтверждаем тем же вопросом на соседнем кадре
             for t2 in (t + 0.75, t - 0.75):
