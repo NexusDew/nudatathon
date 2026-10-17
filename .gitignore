@@ -21,3 +21,6 @@ __pycache__/
 runs/
 eval_out/
 .ipynb_checkpoints/
+
+# Материалы организаторов — не публикуем
+presentation/How to Win the Datathon.pdf
