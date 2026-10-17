@@ -18,7 +18,7 @@ CACHE_DIR = Path(os.getenv("VLM_CACHE_DIR", "runs/vlm_cache"))
 
 
 def ask(prompt: str, frames: list[np.ndarray], max_tokens: int = 300, temperature: float = 0.0,
-        timeout: float = 120) -> str:
+        timeout: float = 30) -> str:
     images = [to_jpeg_b64(f) for f in frames]
     key = hashlib.sha1((prompt + "".join(images) + str(max_tokens)).encode()).hexdigest()
     cached = CACHE_DIR / f"{key}.txt"

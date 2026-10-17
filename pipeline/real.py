@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -25,6 +26,10 @@ from .vlm import prompts as P
 log = logging.getLogger("pipeline")
 
 MIN_ABSENCE = 2     # уход засчитываем, если кассира нет >= 2 сканов подряд (или до конца видео)
+# Бюджет на видео: лимит жюри 300 с считается с момента загрузки, плюс возможная очередь.
+# Скан останавливается на SCAN_SHARE бюджета, остальное — на уточнения и проверки.
+BUDGET_SEC = float(os.getenv("VIDEO_BUDGET_SEC", "150"))
+SCAN_SHARE = 0.6
 CROP_SIDE = 640     # размер увеличенного фрагмента рабочего места для VLM
 PERSON_SIDE = 448   # размер увеличенного фрагмента человека
 MAX_PERSONS = 2     # сколько людей у стола проверяем на кадре
@@ -83,7 +88,12 @@ def _crop(frame: np.ndarray, box, side: int = CROP_SIDE) -> np.ndarray:
     return cv2.resize(c, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC if s > 1 else cv2.INTER_AREA)
 
 
+_deadline = float("inf")  # жёсткий предел на видео; воркер один, поэтому достаточно модульной переменной
+
+
 def _ask(prompt: str, frames: list[np.ndarray]) -> dict:
+    if time.time() > _deadline:
+        return {}
     try:
         return ask_json(prompt, frames)
     except Exception as e:  # noqa: BLE001 — один неудачный ответ не должен ронять анализ
@@ -120,7 +130,9 @@ def _persons_at_desk(frame: np.ndarray, desk) -> list[tuple]:
 
 
 def analyze_real(path: str) -> list[Violation]:
+    global _deadline
     t_start = time.time()
+    _deadline = t_start + BUDGET_SEC
     v = _Video(path)
     H, W = v.info.height, v.info.width
 
@@ -134,6 +146,9 @@ def analyze_real(path: str) -> list[Violation]:
     scans = []
     for t in np.arange(0.5, max(0.6, v.dur - 0.5), step):
         t = float(t)
+        if time.time() - t_start > BUDGET_SEC * SCAN_SHARE:
+            log.warning("%s: бюджет времени исчерпан, скан остановлен на %.1f с из %.1f", path, t, v.dur)
+            break
         f = v.at(t)
         a = _ask(P.SCAN, [_crop(f, wp)])
         s = _Scan(t, bool(a.get("cashier_at_desk", True)), a)
@@ -146,6 +161,19 @@ def analyze_real(path: str) -> list[Violation]:
     violations.sort(key=lambda x: x.timecode_sec)
     log.info("%s: %d сканов, %d событий, %.1f с", path, len(scans), len(violations), time.time() - t_start)
     return violations
+
+
+def _laptop_box(frame: np.ndarray, near) -> tuple | None:
+    """Самый уверенный ноутбук рядом со столом, с запасом по краям (экран бывает выше бокса)."""
+    H, W = frame.shape[:2]
+    best = None
+    for d in _get_detector()([frame])[0]:
+        if d.cls != "laptop" or d.score < 0.5:
+            continue
+        cx, cy = (d.box[0] + d.box[2]) / 2, (d.box[1] + d.box[3]) / 2
+        if near[0] <= cx <= near[2] and near[1] <= cy <= near[3] and (best is None or d.score > best.score):
+            best = d
+    return expand(tuple(int(x) for x in best.box), W, H, 0.25, 0.25, 0.25, 0.1) if best else None
 
 
 # --- уход с рабочего места ---
@@ -185,15 +213,24 @@ def _check_departure(v: _Video, scans: list[_Scan], i: int, j: int, step: float,
     found: dict[str, float] = {}
     for t in checks:
         a = _ask(P.DESK, [_crop(v.at(t), surf)])
-        for k in ("banknotes_or_cash", "cash_bag_or_sack", "laptop_screen_lit"):
+        # Сумку модель часто называет «личной», даже если это инкассаторская — без кассира на столе любая сумка подозрительна
+        for k in ("banknotes_or_cash", "cash_bag_or_sack", "personal_bag_or_clothes"):
             if a.get(k) and k not in found:
                 found[k] = t
+        # Экран: горящий экран блокировки — норма, нарушение — открытое рабочее приложение
+        if "laptop_screen_lit" not in found:
+            lb = _laptop_box(v.at(t), surf)
+            if lb and _ask(P.SCREEN, [_crop(v.at(t), lb, PERSON_SIDE)]).get("screen") == "application":
+                found["laptop_screen_lit"] = t
 
     out = []
-    valuables = [name for k, name in (("banknotes_or_cash", "наличные денежные средства"),
-                                      ("cash_bag_or_sack", "инкассаторская сумка")) if k in found]
+    kinds = (("banknotes_or_cash", "наличные денежные средства"), ("cash_bag_or_sack", "инкассаторская сумка"),
+             ("personal_bag_or_clothes", "сумка"))
+    valuables = [name for k, name in kinds if k in found]
+    if "инкассаторская сумка" in valuables and "сумка" in valuables:
+        valuables.remove("сумка")
     if valuables:
-        t_seen = min(found[k] for k in ("banknotes_or_cash", "cash_bag_or_sack") if k in found)
+        t_seen = min(found[k] for k, _ in kinds if k in found)
         out.append(Violation(
             "unattended_valuables", t_leave,
             f"В {_fmt(t_leave)} кассир покидает рабочее место. На кадре {_fmt(t_seen)} кассира у стола нет, "
@@ -205,23 +242,62 @@ def _check_departure(v: _Video, scans: list[_Scan], i: int, j: int, step: float,
         out.append(Violation(
             "unlocked_workstation", t_leave,
             f"В {_fmt(t_leave)} кассир покидает рабочее место. На кадре {_fmt(t_seen)} кассира у стола нет, "
-            f"а экран ноутбука остаётся включённым с отображаемой информацией.",
+            f"а на экране ноутбука открыто рабочее приложение — компьютер не заблокирован.",
             _evidence(v, [(t_leave, None), (t_seen, None), (t_seen, surf)]),
         ))
     return out
 
 
+# --- кто из людей у стола кассир ---
+
+def _center(b) -> tuple[float, float]:
+    return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+
+
+def _cashier_anchor(v: _Video, scans: list[_Scan], wp) -> tuple[float, float] | None:
+    """Где сидит кассир: на 3 моментах с 2+ людьми у стола VLM выбирает кассира среди помеченных рамок.
+
+    Клиенты тоже бывают с телефоном — без этого шага телефон клиента засчитывался бы кассиру.
+    """
+    multi = [s for s in scans if len(s.persons) >= 2]
+    votes = []
+    for s in multi[:: max(1, len(multi) // 3)][:3]:
+        f = v.at(s.t).copy()
+        for (b, _), lab, col in zip(s.persons, "AB", ((0, 0, 255), (255, 0, 0))):
+            cv2.rectangle(f, b[:2], b[2:], col, 3)
+            cv2.putText(f, lab, (b[0] + 5, b[1] + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.1, col, 3)
+        lab = str(_ask(P.ROLE, [_crop(f, wp)]).get("cashier", "")).strip().upper()[:1]
+        if lab in ("A", "B") and "AB".index(lab) < len(s.persons):
+            votes.append(_center(s.persons["AB".index(lab)][0]))
+    if not votes:
+        return None
+    anchor = tuple(float(x) for x in np.median(np.array(votes), axis=0))
+    log.debug("кассир: %s по %d голосам", anchor, len(votes))
+    return anchor
+
+
+def _is_cashier(box, persons, anchor) -> bool:
+    if anchor is None:
+        return True
+    d = np.hypot(*np.subtract(_center(box), anchor))
+    others = [np.hypot(*np.subtract(_center(o), anchor)) for o, _ in persons if o != box]
+    if others:
+        return d <= min(others)
+    return d < (box[3] - box[1])  # один человек у стола: кассир, если он примерно на месте кассира
+
+
 # --- телефон, еда, напитки ---
 
-def _candidates(scans: list[_Scan], kind: str) -> list[tuple[float, tuple | None, bool]]:
+def _candidates(scans: list[_Scan], kind: str, anchor=None) -> list[tuple[float, tuple | None, bool]]:
     """(время, бокс человека, сильный?) — где скан рабочего места или фрагмент человека указал на событие.
 
     Сильный кандидат — «да» от увеличенного фрагмента человека; слабый — только от общего вида рабочего места.
     """
     out = []
     for s in scans:
+        cashiers = [(b, a) for b, a in s.persons if _is_cashier(b, s.persons, anchor)]
         boxes = []
-        for box, a in s.persons:
+        for box, a in cashiers:
             hit = a.get("holds_mobile_phone") if kind == "phone" else (a.get("eats") or a.get("drinks"))
             if hit:
                 boxes.append(box)
@@ -230,8 +306,8 @@ def _candidates(scans: list[_Scan], kind: str) -> list[tuple[float, tuple | None
                  (w.get("cashier_holds") in ("food", "drink") or w.get("eats_or_drinks"))
         if boxes:
             out += [(s.t, b, True) for b in boxes]
-        elif wp_hit:  # рабочее место говорит «да», но фрагменты людей — нет: проверим всех у стола
-            out += [(s.t, b, False) for b, _ in s.persons] or [(s.t, None, False)]
+        elif wp_hit:  # рабочее место говорит «да», но фрагменты людей — нет: проверим кассира
+            out += [(s.t, b, False) for b, _ in cashiers] or ([(s.t, None, False)] if not s.persons else [])
     return out
 
 
@@ -247,8 +323,10 @@ def _episodes(cands: list[tuple[float, tuple | None]], step: float) -> list[list
 
 def _hand_events(v: _Video, scans: list[_Scan], step: float, wp) -> list[Violation]:
     out = []
-    for ep in _episodes(_candidates(scans, "phone"), step):
-        hit = _verify(v, ep, wp, P.PHONE, lambda a: a.get("mobile_phone_in_hands"))
+    anchor = _cashier_anchor(v, scans, wp)
+    for ep in _episodes(_candidates(scans, "phone", anchor), step):
+        hit = _verify(v, ep, wp, P.PHONE, lambda a: a.get("mobile_phone_in_hands"),
+                      lambda a: a.get("holds_mobile_phone"))
         if hit:
             t, box, _ = hit
             out.append(Violation(
@@ -256,8 +334,9 @@ def _hand_events(v: _Video, scans: list[_Scan], step: float, wp) -> list[Violati
                 f"С {_fmt(t)} кассир держит в руках мобильный телефон на рабочем месте.",
                 _evidence(v, [(t, None), (t, box or wp)]),
             ))
-    for ep in _episodes(_candidates(scans, "eat"), step):
-        hit = _verify(v, ep, wp, P.EAT, lambda a: a.get("eats") or a.get("drinks"))
+    for ep in _episodes(_candidates(scans, "eat", anchor), step):
+        hit = _verify(v, ep, wp, P.EAT, lambda a: a.get("eats") or a.get("drinks"),
+                      lambda a: a.get("eats") or a.get("drinks"))
         if hit:
             t, box, a = hit
             what = " и ".join(x for x, k in (("ест", "eats"), ("пьёт", "drinks")) if a.get(k)) or "ест или пьёт"
@@ -269,13 +348,30 @@ def _hand_events(v: _Video, scans: list[_Scan], step: float, wp) -> list[Violati
     return out
 
 
-def _verify(v: _Video, ep, wp, prompt: str, ok):
+def _verify(v: _Video, ep, wp, prompt: str, ok, person_ok=None):
     """Подтверждение эпизода: до 3 кандидатов (сильные первыми), контекст рабочего места + 2 кадра человека."""
     ordered = sorted(ep, key=lambda c: (not c[2], c[0]))
-    for t, box, _ in ordered[:3]:
+
+    def check(t: float, b) -> dict:
+        return _ask(prompt, [_crop(v.at(t), wp), _crop(v.at(t), b, PERSON_SIDE), _crop(v.at(t + 1), b, PERSON_SIDE)])
+
+    for t, box, strong in ordered[:3]:
         b = box or wp
-        a = _ask(prompt, [_crop(v.at(t), wp), _crop(v.at(t), b, PERSON_SIDE), _crop(v.at(t + 1), b, PERSON_SIDE)])
+        if strong and person_ok is not None:
+            # Фрагмент человека уже сказал «да» — подтверждаем тем же вопросом на соседнем кадре
+            for t2 in (t + 0.75, t - 0.75):
+                if 0 <= t2 < v.dur - 1:
+                    a2 = _ask(P.PERSON, [_crop(v.at(t2), b, PERSON_SIDE)])
+                    log.debug("repeat %.1f box=%s -> %s", t2, box, a2)
+                    if person_ok(a2):
+                        return min(t, t2), box, a2
+            continue
+        a = check(t, b)
         log.debug("verify %.1f box=%s -> %s", t, box, a)
-        if ok(a):
-            return t, box, a
+        if not ok(a):
+            continue
+        # Второе, независимое подтверждение в соседний момент: один кадр слишком часто ошибается
+        for t2 in (t + 0.75, t - 0.75):  # короткие события (откусить, отпить) длятся 2–3 с
+            if 0 <= t2 < v.dur - 1 and ok(check(t2, b)):
+                return min(t, t2), box, a
     return None

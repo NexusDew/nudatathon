@@ -35,8 +35,14 @@ Answer ONLY JSON: {"screen": "application" | "lock_screen" | "off", "evidence": 
 PHONE = """Image 1: a bank cashier's workplace from a ceiling CCTV camera. Images 2-3: zoom on one person
 from image 1, taken 1 second apart.
 Is this person holding or using a personal mobile phone / smartphone?
-A desk telephone handset, calculator, banknotes, bank cards or documents do NOT count as a mobile phone.
+A smartphone is a rigid flat slab with a screen (the screen may be lit). Banknotes — folded or fanned out in the hand —
+paper documents, bank cards, a calculator or a desk telephone handset do NOT count.
 Answer ONLY JSON: {"mobile_phone_in_hands": true/false, "evidence": "what exactly is visible, <= 15 words"}"""
+
+ROLE = """A frame from a ceiling CCTV camera in a bank cash room. People at the desk are marked with labelled boxes.
+Which marked person is the bank cashier — the employee who works at this desk (operates the banknote counting machine
+and the laptop, sits in the employee's chair)? The others are clients, collectors or visitors.
+Answer ONLY JSON: {"cashier": "<label of the box>", "why": "<= 12 words"}"""
 
 EAT = """Image 1: a bank cashier's workplace from a ceiling CCTV camera. Images 2-3: zoom on one person
 from image 1, taken 1 second apart.
