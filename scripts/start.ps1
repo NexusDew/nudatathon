@@ -1,7 +1,7 @@
 # Запуск сервиса одной командой: llama-server (VLM) + API.
 #   powershell -ExecutionPolicy Bypass -File scripts\start.ps1 [-Model 4b|8b] [-Port 8000]
 param(
-    [ValidateSet("4b", "8b")] [string]$Model = "4b",
+    [ValidateSet("4b", "8b")] [string]$Model = "8b",
     [int]$Port = 8000
 )
 $ErrorActionPreference = "Stop"
@@ -19,7 +19,8 @@ $llama = Get-Process llama-server -ErrorAction SilentlyContinue
 if (-not $llama) {
     Write-Host "Запуск llama-server ($Name)..."
     Start-Process -FilePath "$Root\weights\llama.cpp\llama-server.exe" -WindowStyle Minimized -ArgumentList @(
-        "-m", $Gguf, "--mmproj", $Mmproj, "-ngl", "99", "-c", "8192",
+        # 4 слота = 4 параллельных запроса одним батчем (VLM_PARALLEL в пайплайне), 2048 токенов на слот
+        "-m", $Gguf, "--mmproj", $Mmproj, "-ngl", "99", "-c", "8192", "-np", "4", "-fa", "on",
         "--host", "127.0.0.1", "--port", "8080"
     )
 }

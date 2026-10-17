@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import cv2
@@ -30,6 +31,7 @@ MIN_ABSENCE = 2     # уход засчитываем, если кассира �
 # Скан останавливается на SCAN_SHARE бюджета, остальное — на уточнения и проверки.
 BUDGET_SEC = float(os.getenv("VIDEO_BUDGET_SEC", "150"))
 SCAN_SHARE = 0.6
+VLM_PARALLEL = int(os.getenv("VLM_PARALLEL", "4"))  # = числу слотов llama-server (-np)
 CROP_SIDE = 640     # размер увеличенного фрагмента рабочего места для VLM
 PERSON_SIDE = 448   # размер увеличенного фрагмента человека
 MAX_PERSONS = 2     # сколько людей у стола проверяем на кадре
@@ -142,20 +144,27 @@ def analyze_real(path: str) -> list[Violation]:
         desk = (0, 0, W, H)
     wp, surf = workplace_box(desk, W, H), desk_surface_box(desk, W, H)
 
+    # Кадры и детекции — в основном потоке (cv2.VideoCapture и детектор не потокобезопасны),
+    # запросы к VLM — параллельно: llama-server обрабатывает слоты одним батчем
     step = _step_for(v.dur)
-    scans = []
-    for t in np.arange(0.5, max(0.6, v.dur - 0.5), step):
-        t = float(t)
-        if time.time() - t_start > BUDGET_SEC * SCAN_SHARE:
-            log.warning("%s: бюджет времени исчерпан, скан остановлен на %.1f с из %.1f", path, t, v.dur)
-            break
-        f = v.at(t)
+    frames = [(float(t), v.at(float(t))) for t in np.arange(0.5, max(0.6, v.dur - 0.5), step)]
+    jobs = [(t, f, _persons_at_desk(f, desk)) for t, f in frames]
+    scan_deadline = t_start + BUDGET_SEC * SCAN_SHARE
+
+    def scan_one(job) -> _Scan | None:
+        t, f, boxes = job
+        if time.time() > scan_deadline:
+            return None
         a = _ask(P.SCAN, [_crop(f, wp)])
         s = _Scan(t, bool(a.get("cashier_at_desk", True)), a)
-        for box in _persons_at_desk(f, desk):
-            s.persons.append((box, _ask(P.PERSON, [_crop(f, box, PERSON_SIDE)])))
+        s.persons = [(box, _ask(P.PERSON, [_crop(f, box, PERSON_SIDE)])) for box in boxes]
         log.debug("scan %.1f present=%s wp=%s persons=%s", t, s.present, a, [p[1] for p in s.persons])
-        scans.append(s)
+        return s
+
+    with ThreadPoolExecutor(VLM_PARALLEL) as pool:
+        scans = [s for s in pool.map(scan_one, jobs) if s is not None]
+    if len(scans) < len(jobs):
+        log.warning("%s: бюджет времени исчерпан, просканировано %d из %d моментов", path, len(scans), len(jobs))
 
     violations = _departures(v, scans, step, wp, surf) + _hand_events(v, scans, step, wp)
     violations.sort(key=lambda x: x.timecode_sec)
@@ -298,12 +307,11 @@ def _candidates(scans: list[_Scan], kind: str, anchor=None) -> list[tuple[float,
         cashiers = [(b, a) for b, a in s.persons if _is_cashier(b, s.persons, anchor)]
         boxes = []
         for box, a in cashiers:
-            hit = a.get("holds_mobile_phone") if kind == "phone" else (a.get("eats") or a.get("drinks"))
+            hit = a.get("phone") if kind == "phone" else (a.get("eats") or a.get("drinks"))
             if hit:
                 boxes.append(box)
         w = s.workplace
-        wp_hit = (w.get("cashier_holds") == "phone" or w.get("uses_mobile_phone")) if kind == "phone" else \
-                 (w.get("cashier_holds") in ("food", "drink") or w.get("eats_or_drinks"))
+        wp_hit = w.get("phone") if kind == "phone" else w.get("eat_drink")
         if boxes:
             out += [(s.t, b, True) for b in boxes]
         elif wp_hit:  # рабочее место говорит «да», но фрагменты людей — нет: проверим кассира
@@ -325,8 +333,7 @@ def _hand_events(v: _Video, scans: list[_Scan], step: float, wp) -> list[Violati
     out = []
     anchor = _cashier_anchor(v, scans, wp)
     for ep in _episodes(_candidates(scans, "phone", anchor), step):
-        hit = _verify(v, ep, wp, P.PHONE, lambda a: a.get("mobile_phone_in_hands"),
-                      lambda a: a.get("holds_mobile_phone"))
+        hit = _verify(v, ep, wp, P.PHONE, lambda a: a.get("phone"), lambda a: a.get("phone"))
         if hit:
             t, box, _ = hit
             out.append(Violation(
