@@ -189,7 +189,7 @@ def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
         log.warning("%s: бюджет времени исчерпан, просканировано %d из %d моментов", path, len(scans), len(jobs))
 
     violations = _departures(v, scans, step, wp, surf) + _hand_events(v, scans, step, wp) + \
-        _outsider_events(v, scans, area)
+        _outsider_events(v, scans, area) + _personal_items(v, surf)
     violations.sort(key=lambda x: x.timecode_sec)
     log.info("%s: %d сканов, %d событий, %.1f с (до скана %.1f с; VLM: %d запросов, сумма %.1f с)",
              path, len(scans), len(violations), time.time() - t_start, t_scan0 - t_start, *_vlm_stat)
@@ -270,15 +270,20 @@ def _check_departure(v: _Video, scans: list[_Scan], i: int, j: int, step: float,
             if lb and _ask(P.SCREEN, [_crop(v.at(t), lb, PERSON_SIDE)]).get("screen") == "application":
                 found["laptop_screen_lit"] = t
 
+    # Сумка: модель путает инкассаторский мешок с личной сумкой — уточняем отдельным вопросом
+    bag_t = found.pop("personal_bag_or_clothes", None)
+    if bag_t is not None:
+        kind = _ask(P.BAG, [_crop(v.at(bag_t), surf)]).get("bag_kind")
+        if kind == "cash_collection_bag":
+            found.setdefault("cash_bag_or_sack", bag_t)
+        # личные вещи ловит _personal_items по всему видео, здесь их не дублируем
+
     out = []
     kinds = (("banknotes_or_cash", "наличные денежные средства"),
              ("coin_rolls_or_wrapped_cash", "упакованные наличные (рулоны/пачки)"),
              ("cash_bag_or_sack", "инкассаторская сумка"),
-             ("ledger_or_cash_documents", "кассовые документы/журнал"),
-             ("personal_bag_or_clothes", "сумка"))
+             ("ledger_or_cash_documents", "кассовые документы/журнал"))
     valuables = [name for k, name in kinds if k in found]
-    if "инкассаторская сумка" in valuables and "сумка" in valuables:
-        valuables.remove("сумка")
     if valuables:
         t_seen = min(found[k] for k, _ in kinds if k in found)
         out.append(Violation(
@@ -336,9 +341,30 @@ def _is_cashier(box, persons, anchor) -> bool:
     return d < (box[3] - box[1])  # один человек у стола: кассир, если он примерно на месте кассира
 
 
+# --- личные вещи на рабочем столе ---
+
+def _personal_items(v: _Video, surf) -> list[Violation]:
+    """Личная сумка/одежда на рабочем столе — нарушение и при кассире на месте (Х-40).
+    4 проверки по видео, нужно 2 совпадения: одиночный ответ модели бывает ошибочным."""
+    ts = [v.clamp(v.dur * k) for k in (0.25, 0.5, 0.75, 0.97)]
+    crops = [_crop(v.at(t), surf) for t in ts]  # кадры читаем в основном потоке: VideoCapture не потокобезопасен
+    with ThreadPoolExecutor(VLM_PARALLEL) as pool:
+        kinds = list(pool.map(lambda c: _ask(P.BAG, [c]).get("bag_kind"), crops))
+    hits = [t for t, k in zip(ts, kinds) if k == "personal_belongings"]
+    if len(hits) < 2:
+        return []
+    t = hits[0]
+    return [Violation(
+        "personal_items", t,
+        f"На кадрах {', '.join(_fmt(x) for x in hits)} на рабочем столе кассира лежат личные вещи (сумка или одежда).",
+        _evidence(v, [(t, None), (t, surf), (hits[-1], surf)]),
+    )]
+
+
 # --- посторонний на стороне сотрудника ---
 
 def _people_in(frame: np.ndarray, area) -> int:
+    # Порог по высоте рамки (h >= 22% кадра) пробовали (v10): убирает ложное на Х-12, но теряет Х-30
     n = 0
     for d in _get_detector()([frame])[0]:
         if d.cls == "person" and d.score >= 0.5:
