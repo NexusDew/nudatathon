@@ -10,11 +10,19 @@ FAQ 7 разрешает открытые датасеты. FAQ 24 допуск�
 
 | Датасет | Что даёт | Лицензия | Статус |
 |---|---|---|---|
-| [Open Images V7](https://storage.googleapis.com/openimages/web/factsfigures_v7.html) | боксы: `Mobile phone`, `Laptop`, `Coffee cup`, `Mug`, `Handbag`, `Door`, `Door handle`, `Coin`, `Human hand` (банкнот нет) | разметка CC BY 4.0, изображения CC BY 2.0 | можно, с атрибуцией; Google не гарантирует лицензию каждого изображения |
-| [Roboflow: banknote-detection](https://universe.roboflow.com/bin-mibxd/banknote-detection-2amdt) | 1 595 изображений, класс `Banknote` | CC BY 4.0 (по выдаче поиска) | проверить лицензию на странице перед загрузкой |
-| [Roboflow: banknotes](https://universe.roboflow.com/areeya-that/banknotes-tynx8) | 1 455 изображений, банкноты трёх номиналов | CC BY 4.0 (по выдаче поиска) | проверить лицензию на странице перед загрузкой |
+| [Open Images V7](https://storage.googleapis.com/openimages/web/factsfigures_v7.html) | боксы: `Mobile phone`, `Laptop`, `Coffee cup`, `Mug`, `Handbag`, `Door`, `Door handle`, `Coin`, `Human hand` (банкнот нет) | разметка CC BY 4.0, изображения «listed as» CC BY 2.0 | можно, с атрибуцией и проверкой лицензии каждого изображения (ниже) |
 
-Банкноты в наборах Roboflow — не тенге: годятся как «пачка купюр в руке/на столе», не для номинала.
+Google пишет: «we make no representations or warranties regarding the license status of each image and
+you should verify the license for each image yourself». Поэтому при выгрузке берём из метаданных
+изображений колонку `License` и оставляем только CC BY 2.0; `OriginalURL` и `Author` сохраняем для атрибуции.
+
+### Не подходит: Roboflow Universe
+
+Даже наборы с пометкой CC BY 4.0 берём только с оговоркой. По [условиям Roboflow](https://roboflow.com/terms)
+на бесплатном Public Plan сервис можно использовать «only … for your own internal, non-commercial use»
+(разд. 2, 4a), а скачанное «cannot be re-hosted … without prior express permission from the dataset or content
+author» (разд. 5). Для коммерческого решения — только платный план или прямое разрешение автора набора.
+Банкнот в допустимых открытых наборах нет — купюры размечаем на своих кадрах.
 
 ## Модели
 
