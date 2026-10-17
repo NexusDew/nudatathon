@@ -48,6 +48,19 @@ def load_labels(data_dir: Path) -> pd.DataFrame:
     return df.dropna(subset=["path"])
 
 
+def load_types(path: Path) -> dict[str, set[str]]:
+    """Ручная разметка типов от команды: видео -> множество type_id (без 'none')."""
+    if not path.exists():
+        return {}
+    out: dict[str, set[str]] = {}
+    # В заметках бывают запятые без кавычек — делим строку только по первым трём запятым
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        parts = line.split(",", 3)
+        if len(parts) >= 3 and parts[2].strip() and parts[2].strip() != "none":
+            out.setdefault(norm_name(parts[0]), set()).add(parts[2].strip())
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="open")
@@ -57,6 +70,7 @@ def main() -> None:
     args = ap.parse_args()
 
     df = load_labels(Path(args.data))
+    gt_types = load_types(Path(__file__).resolve().parent.parent / "docs" / "labels_types.csv")
     if args.only:
         keep = {norm_name(x) for x in args.only.split(",")}
         df = df[df["key"].isin(keep)]
@@ -73,10 +87,13 @@ def main() -> None:
         pred = bool(viols)
         tcs = [v.timecode_sec for v in viols]
         loc_err = min((abs(t - r.gt_time) for t in tcs), default=None) if r.gt_time is not None else None
+        expected = gt_types.get(r.key, set())
         rows.append({
             "video": r.key, "gt": r.gt_violation, "pred": pred, "gt_time": r.gt_time,
             "pred_times": ";".join(f"{t:.1f}" for t in tcs),
             "types": ";".join(v.type_id for v in viols),
+            "gt_types": ";".join(sorted(expected)),
+            "type_ok": bool(expected & {v.type_id for v in viols}) if expected else None,
             "loc_err": loc_err, "sec": round(dt, 1), "error": err,
         })
         mark = "OK " if pred == r.gt_violation else "ERR"
@@ -98,6 +115,11 @@ def main() -> None:
           f"precision={tp / max(tp + fp, 1):.3f}")
     if len(loc):
         print(f"таймкод: медиана |ошибки|={loc.median():.1f} с, в ±{args.tol} с: {(loc <= args.tol).mean():.0%}")
+    typed = res.loc[gt & pr & res["type_ok"].notna()]
+    if len(typed):
+        ok = typed["type_ok"].astype(bool)
+        print(f"тип (по docs/labels_types.csv): верный в {ok.sum()} из {len(typed)} найденных нарушений; "
+              f"неверный: {', '.join(typed.loc[~ok, 'video'] + ' ' + typed.loc[~ok, 'types'] + '≠' + typed.loc[~ok, 'gt_types'])}")
     print(f"время: среднее {res.sec.mean():.1f} с, максимум {res.sec.max():.1f} с (лимит 300 с)")
     if fn:
         print("ПРОПУЩЕНЫ:", ", ".join(res.loc[gt & ~pr, "video"]))

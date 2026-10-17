@@ -20,6 +20,11 @@ What else lies on the desk surface? Answer ONLY JSON:
 {"banknotes_or_cash": true/false, "coin_rolls_or_wrapped_cash": true/false, "cash_bag_or_sack": true/false,
  "ledger_or_cash_documents": true/false, "personal_bag_or_clothes": true/false}"""
 
+BAG = """A zoomed crop of a bank cashier's desk from a ceiling CCTV camera. Is there a bag, sack or clothing lying on the desk?
+If yes, what kind: a cash-collection bag (a plain fabric sack, often green/grey, sealed, used by cash collectors)
+or the employee's personal belongings (a handbag, backpack, jacket, coat)?
+Answer ONLY JSON: {"bag_kind": "cash_collection_bag" | "personal_belongings" | "none"}"""
+
 OUTSIDER = """A frame from a ceiling CCTV camera in a bank cash room. The cashier's desk has a banknote counting machine and a laptop.
 The cashier works seated on the employee side of the desk; clients stay on the opposite side.
 Is there any OTHER person (not the seated cashier) standing or sitting on the EMPLOYEE side of the desk — next to or behind the cashier's chair,
