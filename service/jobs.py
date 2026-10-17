@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from pipeline import analyze
+from pipeline.analyze import warmup
 from pipeline.catalog import rule_for, verified_sources
 
 log = logging.getLogger("jobs")
@@ -64,6 +65,10 @@ class JobStore:
                 self._queue.put(d.name)
 
     def _worker(self) -> None:
+        try:
+            warmup()
+        except Exception:  # noqa: BLE001 — сервис должен подняться, ошибка всплывёт на первой задаче
+            log.exception("warmup failed")
         while True:
             job_id = self._queue.get()
             job = self.get(job_id) or {"job_id": job_id}

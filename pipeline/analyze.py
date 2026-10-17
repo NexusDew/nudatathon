@@ -14,7 +14,17 @@ def analyze(video_path: str) -> list[Violation]:
     mode = os.getenv("PIPELINE_MODE", "stub")
     if mode == "stub":
         return _stub(video_path)
+    if mode == "real":
+        from .real import analyze_real
+        return analyze_real(video_path)
     raise NotImplementedError(f"PIPELINE_MODE={mode} ещё не реализован")
+
+
+def warmup() -> None:
+    """Загрузка моделей заранее, чтобы первое видео не ждало инициализации."""
+    if os.getenv("PIPELINE_MODE", "stub") == "real":
+        from .real import _get_detector
+        _get_detector()
 
 
 def _stub(video_path: str) -> list[Violation]:
