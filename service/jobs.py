@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -17,6 +18,7 @@ from pipeline.analyze import warmup
 from pipeline.catalog import rule_for, verified_sources
 
 log = logging.getLogger("jobs")
+JOB_DEADLINE_SEC = float(os.getenv("JOB_DEADLINE_SEC", "250"))  # запас 50 с до лимита 300 с
 
 
 class JobStore:
@@ -74,8 +76,14 @@ class JobStore:
             job = self.get(job_id) or {"job_id": job_id}
             video = self.root / job_id / job.get("video", "")
             started = time.time()
+            # Лимит жюри — 300 с с момента загрузки, включая ожидание в очереди.
+            # Оставшееся время делим поровну с задачами, которые ждут за этой: иначе хвост очереди
+            # получает пустой анализ, а первые видео — лишнюю точность
+            deadline = job.get("submitted_at", started) + JOB_DEADLINE_SEC
+            waiting = self._queue.qsize()
+            deadline = started + max(0.0, deadline - started) / (1 + waiting)
             try:
-                violations = analyze(str(video))
+                violations = analyze(str(video), deadline)
                 result = {
                     "job_id": job_id,
                     "status": "done",

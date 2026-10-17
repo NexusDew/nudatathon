@@ -51,7 +51,17 @@ class Detector:
         id2label = self.model.config.id2label
         self.keep = {int(i): CLASS_MAP[name] for i, name in id2label.items() if name in CLASS_MAP}
 
-    def __call__(self, frames_bgr: list[np.ndarray]) -> list[list[Det]]:
+    def __call__(self, frames_bgr: list[np.ndarray], batch: int = 2) -> list[list[Det]]:
+        # Малые батчи + сброс кэша PyTorch: на 8 ГБ рядом с VLM каждые 0.5 ГБ резерва
+        # выталкивают модель в общую память Windows и замедляют всё в разы
+        out = []
+        for i in range(0, len(frames_bgr), batch):
+            out += self._run(frames_bgr[i:i + batch])
+        if self.device == "cuda":
+            self.torch.cuda.empty_cache()
+        return out
+
+    def _run(self, frames_bgr: list[np.ndarray]) -> list[list[Det]]:
         torch = self.torch
         rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr]
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)

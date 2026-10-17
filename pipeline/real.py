@@ -32,6 +32,7 @@ MIN_ABSENCE = 2     # уход засчитываем, если кассира �
 BUDGET_SEC = float(os.getenv("VIDEO_BUDGET_SEC", "150"))
 SCAN_SHARE = 0.6
 VLM_PARALLEL = int(os.getenv("VLM_PARALLEL", "4"))  # = числу слотов llama-server (-np)
+SEC_PER_SCAN = 1.2  # замер на RTX 4060 + 8B, 4 слота: ~1.2 с на момент скана с учётом людей у стола
 CROP_SIDE = 640     # размер увеличенного фрагмента рабочего места для VLM
 PERSON_SIDE = 448   # размер увеличенного фрагмента человека
 MAX_PERSONS = 2     # сколько людей у стола проверяем на кадре
@@ -133,10 +134,12 @@ def _persons_at_desk(frame: np.ndarray, desk) -> list[tuple]:
     return [b for _, b in sorted(out, reverse=True)[:MAX_PERSONS]]
 
 
-def analyze_real(path: str) -> list[Violation]:
+def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
     global _deadline
     t_start = time.time()
-    _deadline = t_start + BUDGET_SEC
+    # Видео в хвосте очереди получает меньше времени: лучше грубый результат, чем таймаут у жюри
+    budget = BUDGET_SEC if deadline is None else max(15.0, min(BUDGET_SEC, deadline - t_start))
+    _deadline = t_start + budget
     v = _Video(path)
     H, W = v.info.height, v.info.width
 
@@ -148,11 +151,13 @@ def analyze_real(path: str) -> list[Violation]:
 
     # Кадры и детекции — в основном потоке (cv2.VideoCapture и детектор не потокобезопасны),
     # запросы к VLM — параллельно: llama-server обрабатывает слоты одним батчем
-    step = _step_for(v.dur)
-    frames = [(float(t), v.at(float(t))) for t in np.arange(0.5, max(0.6, v.dur - 0.5), step)]
+    # Мало времени (очередь) — реже, но по всему видео, а не только по его началу
+    max_scans = max(4, int(budget * SCAN_SHARE / SEC_PER_SCAN))
+    step = max(_step_for(v.dur), v.dur / max_scans)
+    frames =[(float(t), v.at(float(t))) for t in np.arange(0.5, max(0.6, v.dur - 0.5), step)]
     area = expand(desk, W, H, 0.6, 1.6, 0.6, 1.0)  # стол с запасом: кассир, клиенты, подошедшие люди
     jobs = [(t, f, _persons_at_desk(f, desk), _people_in(f, area)) for t, f in frames]
-    scan_deadline = t_start + BUDGET_SEC * SCAN_SHARE
+    scan_deadline = t_start + budget * SCAN_SHARE
 
     def scan_one(job) -> _Scan | None:
         t, f, boxes, n_people = job
@@ -166,8 +171,11 @@ def analyze_real(path: str) -> list[Violation]:
         log.debug("scan %.1f present=%s wp=%s persons=%s", t, s.present, a, [p[1] for p in s.persons])
         return s
 
+    # Порядок «вразброс» (начало, середина, четверти, ...): если бюджет оборвёт скан,
+    # останется равномерное покрытие всего видео, а не только его начало
     with ThreadPoolExecutor(VLM_PARALLEL) as pool:
-        scans = [s for s in pool.map(scan_one, jobs) if s is not None]
+        scans = [s for s in pool.map(scan_one, [jobs[i] for i in _spread_order(len(jobs))]) if s is not None]
+    scans.sort(key=lambda s: s.t)
     if len(scans) < len(jobs):
         log.warning("%s: бюджет времени исчерпан, просканировано %d из %d моментов", path, len(scans), len(jobs))
 
@@ -176,6 +184,19 @@ def analyze_real(path: str) -> list[Violation]:
     violations.sort(key=lambda x: x.timecode_sec)
     log.info("%s: %d сканов, %d событий, %.1f с", path, len(scans), len(violations), time.time() - t_start)
     return violations
+
+
+def _spread_order(n: int) -> list[int]:
+    """Индексы 0..n-1 в порядке последовательного деления пополам: 0, n/2, n/4, 3n/4, ..."""
+    order, seen, k = [0] if n else [], {0}, 1
+    while k < 2 * n:  # уровень k: середины k равных отрезков
+        for j in range(k):
+            i = (2 * j + 1) * n // (2 * k)
+            if i < n and i not in seen:
+                seen.add(i)
+                order.append(i)
+        k *= 2
+    return order + [i for i in range(n) if i not in seen]
 
 
 def _laptop_box(frame: np.ndarray, near) -> tuple | None:

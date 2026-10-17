@@ -10,21 +10,32 @@ from .types import EvidenceFrame, Violation
 from .video import frame_at, probe, to_jpeg_b64
 
 
-def analyze(video_path: str) -> list[Violation]:
+def analyze(video_path: str, deadline: float | None = None) -> list[Violation]:
+    """deadline — абсолютное время (time.time()), к которому результат должен быть готов."""
     mode = os.getenv("PIPELINE_MODE", "stub")
     if mode == "stub":
         return _stub(video_path)
     if mode == "real":
         from .real import analyze_real
-        return analyze_real(video_path)
+        return analyze_real(video_path, deadline)
     raise NotImplementedError(f"PIPELINE_MODE={mode} ещё не реализован")
 
 
 def warmup() -> None:
     """Загрузка моделей заранее, чтобы первое видео не ждало инициализации."""
     if os.getenv("PIPELINE_MODE", "stub") == "real":
+        import numpy as np
+
         from .real import _get_detector
-        _get_detector()
+        from .vlm import ask
+
+        # Холостой прогон: первая задача жюри не должна платить за инициализацию CUDA-ядер (~40 с)
+        dummy = np.full((848, 464, 3), 128, np.uint8)
+        _get_detector()([dummy])
+        try:
+            ask('Answer ONLY JSON: {"ok": true}', [dummy], max_tokens=10)
+        except Exception:  # noqa: BLE001 — VLM-сервер может ещё подниматься; не мешаем старту
+            pass
 
 
 def _stub(video_path: str) -> list[Violation]:
