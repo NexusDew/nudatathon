@@ -58,6 +58,7 @@ class _Video:
     """Доступ к кадрам по времени с кэшем (одни и те же моменты запрашиваются много раз)."""
 
     def __init__(self, path: str):
+        self.path = path
         self.info = probe(path)
         self.cap = cv2.VideoCapture(path)
         self.dur = self.info.duration_sec
@@ -65,6 +66,27 @@ class _Video:
 
     def clamp(self, t: float) -> float:
         return round(min(max(0.0, t), self.dur - 0.1), 2)
+
+    def prefetch(self, times) -> None:
+        """Нужные кадры одним последовательным проходом: на Full HD H.264 каждый seek стоит ~0.35 с
+        (декодирование от ключевого кадра), а grab() без декодирования — почти бесплатно."""
+        want = {}
+        for t in times:
+            t = self.clamp(t)
+            if t not in self._cache:
+                want.setdefault(int(round(t * self.info.fps)), []).append(t)
+        if not want:
+            return
+        cap = cv2.VideoCapture(self.path)
+        last, idx = max(want), 0
+        while idx <= last and cap.grab():
+            if idx in want:
+                ok, f = cap.retrieve()
+                if ok:
+                    for t in want[idx]:
+                        self._cache[t] = f
+            idx += 1
+        cap.release()
 
     def at(self, t: float) -> np.ndarray:
         t = self.clamp(t)
@@ -126,11 +148,11 @@ def _evidence(v: _Video, items: list[tuple[float, tuple | None]]) -> list[Eviden
     return out
 
 
-def _persons_at_desk(frame: np.ndarray, desk) -> list[tuple]:
+def _persons_at_desk(frame: np.ndarray, desk, dets=None) -> list[tuple]:
     """Люди, заметно перекрывающиеся со столом (кассир и клиенты). Люди за стеклом отсекаются."""
     H, W = frame.shape[:2]
     out = []
-    for d in _get_detector()([frame])[0]:
+    for d in (dets if dets is not None else _get_detector()([frame])[0]):
         if d.cls != "person" or d.score < 0.5:
             continue
         x1, y1, x2, y2 = d.box
@@ -151,7 +173,13 @@ def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
     v = _Video(path)
     H, W = v.info.height, v.info.width
 
-    desk = locate_desk([v.at(t) for t in np.linspace(0.5, max(0.6, v.dur - 0.5), 8)], _get_detector())
+    # Мало времени (очередь) — реже, но по всему видео, а не только по его началу
+    max_scans = max(4, int(budget * SCAN_SHARE / SEC_PER_SCAN))
+    step = max(_step_for(v.dur), v.dur / max_scans)
+    scan_times = [float(t) for t in np.arange(0.5, max(0.6, v.dur - 0.5), step)]
+    desk_times = [float(t) for t in np.linspace(0.5, max(0.6, v.dur - 0.5), 8)]
+    v.prefetch(desk_times + scan_times + [v.dur * k for k in (0.25, 0.5, 0.75, 0.97)])
+    desk = locate_desk([v.at(t) for t in desk_times], _get_detector())
     if desk is None:
         log.warning("стол не найден, анализ по полному кадру")
         desk = (0, 0, W, H)
@@ -159,12 +187,10 @@ def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
 
     # Кадры и детекции — в основном потоке (cv2.VideoCapture и детектор не потокобезопасны),
     # запросы к VLM — параллельно: llama-server обрабатывает слоты одним батчем
-    # Мало времени (очередь) — реже, но по всему видео, а не только по его началу
-    max_scans = max(4, int(budget * SCAN_SHARE / SEC_PER_SCAN))
-    step = max(_step_for(v.dur), v.dur / max_scans)
-    frames =[(float(t), v.at(float(t))) for t in np.arange(0.5, max(0.6, v.dur - 0.5), step)]
+    frames = [(t, v.at(t)) for t in scan_times]
     area = expand(desk, W, H, 0.6, 1.6, 0.6, 1.0)  # стол с запасом: кассир, клиенты, подошедшие люди
-    jobs = [(t, f, _persons_at_desk(f, desk), _people_in(f, area)) for t, f in frames]
+    all_dets = _get_detector()([f for _, f in frames])  # один проход детектора на кадр
+    jobs = [(t, f, _persons_at_desk(f, desk, d), _people_in(f, area, d)) for (t, f), d in zip(frames, all_dets)]
     scan_deadline = t_start + budget * SCAN_SHARE
     t_scan0 = time.time()
 
@@ -225,14 +251,20 @@ def _laptop_box(frame: np.ndarray, near) -> tuple | None:
 # --- уход с рабочего места ---
 
 def _departures(v: _Video, scans: list[_Scan], step: float, wp, surf) -> list[Violation]:
+    # Сглаживание: одиночное «на месте» между двумя «нет» — ошибка модели; иначе отсутствие
+    # разрывается и момент ухода съезжает на секунды (Х-26: 12.5 нет, 15.5 «на месте», 18.5 нет)
+    pres = [s.present for s in scans]
+    for k in range(1, len(scans) - 1):
+        if pres[k] and not scans[k - 1].present and not scans[k + 1].present:
+            pres[k] = False
     out: list[Violation] = []
     i = 0
     while i < len(scans):
-        if scans[i].present:
+        if pres[i]:
             i += 1
             continue
         j = i
-        while j + 1 < len(scans) and not scans[j + 1].present:
+        while j + 1 < len(scans) and not pres[j + 1]:
             j += 1
         if j - i + 1 >= MIN_ABSENCE or j == len(scans) - 1:
             out += _check_departure(v, scans, i, j, step, wp, surf)
@@ -363,10 +395,10 @@ def _personal_items(v: _Video, surf) -> list[Violation]:
 
 # --- посторонний на стороне сотрудника ---
 
-def _people_in(frame: np.ndarray, area) -> int:
+def _people_in(frame: np.ndarray, area, dets=None) -> int:
     # Порог по высоте рамки (h >= 22% кадра) пробовали (v10): убирает ложное на Х-12, но теряет Х-30
     n = 0
-    for d in _get_detector()([frame])[0]:
+    for d in (dets if dets is not None else _get_detector()([frame])[0]):
         if d.cls == "person" and d.score >= 0.5:
             cx, cy = _center(d.box)
             n += area[0] <= cx <= area[2] and area[1] <= cy <= area[3]

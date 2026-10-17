@@ -63,7 +63,11 @@ class Detector:
 
     def _run(self, frames_bgr: list[np.ndarray]) -> list[list[Det]]:
         torch = self.torch
-        rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr]
+        # Препроцессор растягивает кадр до 640×640 (bilinear) и на Full HD делает это медленно (~1 с на кадр).
+        # Делаем то же самое заранее через OpenCV — геометрия для модели не меняется, его resize становится
+        # холостым. Рамки возвращаются в размерах исходника через target_sizes ниже.
+        small = [cv2.resize(f, (640, 640), interpolation=cv2.INTER_LINEAR) for f in frames_bgr]
+        rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in small]
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
         inputs["pixel_values"] = inputs["pixel_values"].to(self.dtype)
         with torch.inference_mode():
