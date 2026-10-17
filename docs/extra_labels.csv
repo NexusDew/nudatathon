@@ -1,0 +1,3 @@
+video,time_sec,type_id,angle,note
+E-01-A-1,,phone_use,A,пример: заполнить секунду начала
+E-08-A-1,,none,A,пример: блокирует экран и уходит
