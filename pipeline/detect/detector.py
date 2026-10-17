@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 WEIGHTS_DIR = Path(os.getenv("WEIGHTS_DIR", "D:/nudatathon_weights"))
@@ -21,8 +22,10 @@ CLASS_MAP = {
     "Bread": "food", "Sandwich": "food", "Hamburger": "food", "Cookies": "food",
     "Donut": "food", "Cake": "food", "Candy": "food",
     "Laptop": "laptop", "Monitor/TV": "laptop", "Tablet": "tablet",
-    "Handbag/Satchel": "bag", "Backpack": "bag", "Wallet/Purse": "wallet",
+    "Handbag/Satchel": "bag", "Backpack": "bag", "Luggage": "bag", "Briefcase": "bag", "Wallet/Purse": "wallet",
     "Chair": "chair",
+    "Desk": "desk", "Dinning Table": "desk", "Side Table": "desk",
+    "Telephone": "desk_phone", "Storage box": "box", "Cabinet/shelf": "cabinet",
 }
 
 
@@ -50,7 +53,7 @@ class Detector:
 
     def __call__(self, frames_bgr: list[np.ndarray]) -> list[list[Det]]:
         torch = self.torch
-        rgb = [f[:, :, ::-1] for f in frames_bgr]
+        rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr]
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
         inputs["pixel_values"] = inputs["pixel_values"].to(self.dtype)
         with torch.inference_mode():
