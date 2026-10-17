@@ -9,3 +9,6 @@ pandas
 openpyxl
 pyyaml
 pillow
+huggingface_hub>=0.34
+transformers>=4.57
+accelerate
