@@ -33,4 +33,5 @@ Write-Host "llama-server готов"
 # 2. API + UI
 $env:PIPELINE_MODE = "real"
 $env:WEIGHTS_DIR = $Weights
-& "$Root\.venv\Scripts\python.exe" -m uvicorn service.app:app --host 0.0.0.0 --port $Port
+# Только localhost: наружу сервис выходит через туннель (scripts\tunnel_ngrok.ps1), а не в общую Wi-Fi сеть
+& "$Root\.venv\Scripts\python.exe" -m uvicorn service.app:app --host 127.0.0.1 --port $Port
