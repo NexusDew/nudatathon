@@ -20,6 +20,12 @@ What else lies on the desk surface? Answer ONLY JSON:
 {"banknotes_or_cash": true/false, "coin_rolls_or_wrapped_cash": true/false, "cash_bag_or_sack": true/false,
  "ledger_or_cash_documents": true/false, "personal_bag_or_clothes": true/false}"""
 
+OUTSIDER = """A frame from a ceiling CCTV camera in a bank cash room. The cashier's desk has a banknote counting machine and a laptop.
+The cashier works seated on the employee side of the desk; clients stay on the opposite side.
+Is there any OTHER person (not the seated cashier) standing or sitting on the EMPLOYEE side of the desk — next to or behind the cashier's chair,
+or reaching over to hand something to the cashier from the employee side?
+Answer ONLY JSON: {"other_person_on_employee_side": true/false}"""
+
 CLIENT_SIDE = """Two frames from a ceiling CCTV camera, cropped around a bank cashier's desk, a few seconds after a client left.
 The cashier is marked with the box "C". The client's side of the desk is the side opposite the cashier.
 Answer ONLY JSON:

@@ -82,6 +82,7 @@ class _Scan:
     present: bool
     workplace: dict
     persons: list[tuple[tuple, dict]] = field(default_factory=list)  # (бокс человека, ответ VLM)
+    outsider: bool = False  # посторонний на стороне сотрудника (спрашиваем, только если у стола 2+ человека)
 
 
 def _crop(frame: np.ndarray, box, side: int = CROP_SIDE) -> np.ndarray:
@@ -149,16 +150,19 @@ def analyze_real(path: str) -> list[Violation]:
     # запросы к VLM — параллельно: llama-server обрабатывает слоты одним батчем
     step = _step_for(v.dur)
     frames = [(float(t), v.at(float(t))) for t in np.arange(0.5, max(0.6, v.dur - 0.5), step)]
-    jobs = [(t, f, _persons_at_desk(f, desk)) for t, f in frames]
+    area = expand(desk, W, H, 0.6, 1.6, 0.6, 1.0)  # стол с запасом: кассир, клиенты, подошедшие люди
+    jobs = [(t, f, _persons_at_desk(f, desk), _people_in(f, area)) for t, f in frames]
     scan_deadline = t_start + BUDGET_SEC * SCAN_SHARE
 
     def scan_one(job) -> _Scan | None:
-        t, f, boxes = job
+        t, f, boxes, n_people = job
         if time.time() > scan_deadline:
             return None
         a = _ask(P.SCAN, [_crop(f, wp)])
         s = _Scan(t, bool(a.get("cashier_at_desk", True)), a)
         s.persons = [(box, _ask(P.PERSON, [_crop(f, box, PERSON_SIDE)])) for box in boxes]
+        if n_people >= 2:
+            s.outsider = bool(_ask(P.OUTSIDER, [_crop(f, area, 768)]).get("other_person_on_employee_side"))
         log.debug("scan %.1f present=%s wp=%s persons=%s", t, s.present, a, [p[1] for p in s.persons])
         return s
 
@@ -167,7 +171,8 @@ def analyze_real(path: str) -> list[Violation]:
     if len(scans) < len(jobs):
         log.warning("%s: бюджет времени исчерпан, просканировано %d из %d моментов", path, len(scans), len(jobs))
 
-    violations = _departures(v, scans, step, wp, surf) + _hand_events(v, scans, step, wp)
+    violations = _departures(v, scans, step, wp, surf) + _hand_events(v, scans, step, wp) + \
+        _outsider_events(v, scans, area)
     violations.sort(key=lambda x: x.timecode_sec)
     log.info("%s: %d сканов, %d событий, %.1f с", path, len(scans), len(violations), time.time() - t_start)
     return violations
@@ -298,6 +303,32 @@ def _is_cashier(box, persons, anchor) -> bool:
     if others:
         return d <= min(others)
     return d < (box[3] - box[1])  # один человек у стола: кассир, если он примерно на месте кассира
+
+
+# --- посторонний на стороне сотрудника ---
+
+def _people_in(frame: np.ndarray, area) -> int:
+    n = 0
+    for d in _get_detector()([frame])[0]:
+        if d.cls == "person" and d.score >= 0.5:
+            cx, cy = _center(d.box)
+            n += area[0] <= cx <= area[2] and area[1] <= cy <= area[3]
+    return n
+
+
+def _outsider_events(v: _Video, scans: list[_Scan], area) -> list[Violation]:
+    """Два скана подряд «на стороне сотрудника есть кто-то кроме кассира» (одиночный ответ бывает ошибочным)."""
+    out: list[Violation] = []
+    for i in range(len(scans) - 1):
+        if scans[i].outsider and scans[i + 1].outsider and (i == 0 or not scans[i - 1].outsider):
+            t, t2 = scans[i].t, scans[i + 1].t
+            out.append(Violation(
+                "unauthorized_access", t,
+                f"С {_fmt(t)} у стола кассира на стороне сотрудника находится постороннее лицо (не кассир); "
+                f"на кадре {_fmt(t2)} оно всё ещё там.",
+                _evidence(v, [(t, None), (t2, None), (t2, area)]),
+            ))
+    return out
 
 
 # --- уход клиента: наличные на его стороне стола, пересчёт после ухода ---
