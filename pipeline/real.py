@@ -96,14 +96,21 @@ def _crop(frame: np.ndarray, box, side: int = CROP_SIDE) -> np.ndarray:
 _deadline = float("inf")  # жёсткий предел на видео; воркер один, поэтому достаточно модульной переменной
 
 
+_vlm_stat = [0, 0.0]  # число запросов и суммарное время — для лога (диагностика скорости в сервисе)
+
+
 def _ask(prompt: str, frames: list[np.ndarray]) -> dict:
     if time.time() > _deadline:
         return {}
+    t0 = time.time()
     try:
         return ask_json(prompt, frames)
     except Exception as e:  # noqa: BLE001 — один неудачный ответ не должен ронять анализ
         log.warning("VLM: %r", e)
         return {}
+    finally:
+        _vlm_stat[0] += 1
+        _vlm_stat[1] += time.time() - t0
 
 
 def _fmt(t: float) -> str:
@@ -137,6 +144,7 @@ def _persons_at_desk(frame: np.ndarray, desk) -> list[tuple]:
 def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
     global _deadline
     t_start = time.time()
+    _vlm_stat[:] = [0, 0.0]
     # Видео в хвосте очереди получает меньше времени: лучше грубый результат, чем таймаут у жюри
     budget = BUDGET_SEC if deadline is None else max(15.0, min(BUDGET_SEC, deadline - t_start))
     _deadline = t_start + budget
@@ -158,6 +166,7 @@ def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
     area = expand(desk, W, H, 0.6, 1.6, 0.6, 1.0)  # стол с запасом: кассир, клиенты, подошедшие люди
     jobs = [(t, f, _persons_at_desk(f, desk), _people_in(f, area)) for t, f in frames]
     scan_deadline = t_start + budget * SCAN_SHARE
+    t_scan0 = time.time()
 
     def scan_one(job) -> _Scan | None:
         t, f, boxes, n_people = job
@@ -182,7 +191,8 @@ def analyze_real(path: str, deadline: float | None = None) -> list[Violation]:
     violations = _departures(v, scans, step, wp, surf) + _hand_events(v, scans, step, wp) + \
         _outsider_events(v, scans, area)
     violations.sort(key=lambda x: x.timecode_sec)
-    log.info("%s: %d сканов, %d событий, %.1f с", path, len(scans), len(violations), time.time() - t_start)
+    log.info("%s: %d сканов, %d событий, %.1f с (до скана %.1f с; VLM: %d запросов, сумма %.1f с)",
+             path, len(scans), len(violations), time.time() - t_start, t_scan0 - t_start, *_vlm_stat)
     return violations
 
 
