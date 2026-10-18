@@ -40,40 +40,34 @@ curl -X POST http://localhost:8000/api/v1/analyze -H "X-API-Key: $KEY" -F "file=
 curl http://localhost:8000/api/v1/jobs/<job_id> -H "X-API-Key: $KEY"
 ```
 
-## Структура и владельцы
+## Структура
 
-| Папка | Что | Роль |
-|---|---|---|
-| `service/` | FastAPI, очередь задач, веб-интерфейс | Backend и деплой |
-| `pipeline/analyze.py` | точка входа `analyze(video_path) -> list[Violation]` | общий контракт |
-| `pipeline/detect/`, `pipeline/rules/` | детектор, трекинг, правила по таймлайну | CV и правила |
-| `pipeline/vlm/` | локальная VLM: проверка кандидатов, описания | VLM |
-| `rules/catalog.yaml` | типы нарушений и нормативные источники | Нормативка |
-| `scripts/eval.py` | метрики на обучающем датасете | все |
-| `scripts/smoke_api.py` | проверка API как у жюри | Backend |
-| `docs/` | обзор датасета, архитектура, ограничения | все |
+| Путь | Что |
+|---|---|
+| `service/app.py`, `service/jobs.py` | FastAPI: API для жюри (`X-API-Key`), веб-интерфейс, очередь задач с дедлайном 300 с от загрузки |
+| `service/static/index.html` | веб-интерфейс: загрузка, статус, вердикт, кадры, таймкоды, нормы |
+| `pipeline/analyze.py` | точка входа `analyze(video_path) -> list[Violation]` |
+| `pipeline/real.py` | пайплайн: скан, уходы кассира, телефон/еда, посторонний, личные вещи, уход клиента |
+| `pipeline/scene.py` | поиск стола кассира детектором (без привязки к ракурсу) |
+| `pipeline/detect/` | детектор D-FINE (Objects365) |
+| `pipeline/vlm/` | клиент к локальному llama-server (Qwen3-VL-8B) и промпты |
+| `rules/catalog.yaml` | типы нарушений и нормативные источники (только сверенные с «Әділет») |
+| `scripts/` | запуск, загрузка весов, оценка и проверки (ниже) |
+| `docs/submission.md` | документация к сдаче: архитектура, типы, нормы, метрики, ограничения |
+| `docs/` | обзор датасета, разметка типов командой, внешние данные |
 
-### Контракты (менять только по договорённости)
+Ответ API — схема из ТЗ (раздел 10); дополнительные поля `type_id`, `confidence`, `rule` её не нарушают.
+Источник нормы попадает в ответ, только если в каталоге у него `verified: true`.
 
-1. **Ответ API** — схема из ТЗ, раздел 10. Доп. поля (`type_id`, `confidence`, `rule`) не мешают схеме.
-2. **`analyze(video_path) -> list[Violation]`** (`pipeline/types.py`). Пустой список = `no_violation`.
-3. **`rules/catalog.yaml`** — пайплайн ссылается только на `id` оттуда. Источник попадает в ответ,
-   только если у него `verified: true` (сверен с adilet.zan.kz).
-
-## Проверка качества
+## Проверка качества и нагрузки
 
 ```bash
-python scripts/eval.py --data open                 # все видео
-python scripts/eval.py --data open --only Х-1,Х-2  # выборочно
-python scripts/smoke_api.py --key $KEY --video open/videos/X-1.mov
+python scripts/eval.py --data open                      # метрики на 42 обучающих видео (нужен llama-server)
+python scripts/eval.py --data open --only Х-1,Х-2       # выборочно
+python scripts/smoke_api.py --key $KEY --video open/videos/X-1.mov            # API как у жюри + проверка схемы
+python scripts/load_test.py --key $KEY --videos a.mov,b.mov,c.mov,d.mov,e.mov # несколько видео одновременно
+python scripts/run_folder.py data/external/meva --expect no_violation        # чужие сцены
 ```
 
-Приоритет из FAQ: **пропуск нарушения недопустим**, ложных срабатываний — минимум.
-Лимит 5 минут на видео считается с момента загрузки, поэтому при очереди из нескольких видео
-цель — **< 45 с на видео**.
-
-## Правила работы с git
-
-- Ветки `feat/<область>`, маленькие PR в `main`.
-- Не коммитить видео, датасет, веса и `.env`.
-- Перед PR в пайплайн: прогнать `scripts/eval.py` и приложить итог.
+Итоговые цифры (v12): верный вердикт 28 из 42, найдено 16 из 22 нарушений, 20–60 с на видео,
+5 видео одновременно — 228 с при лимите 300 с. Подробнее — [docs/submission.md](docs/submission.md).
