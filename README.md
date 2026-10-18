@@ -11,11 +11,20 @@ python -m venv .venv
 .venv\Scripts\activate            # Linux: source .venv/bin/activate
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
+python scripts/download_weights.py --dir D:/nudatathon_weights --only dfine,qwen8b,llamacpp
 copy .env.example .env            # и задать API_KEY
-uvicorn service.app:app --host 0.0.0.0 --port 8000
 ```
 
-UI: `http://localhost:8000/`. Датасет положить в `open/` (`open/videos/*.mov`, `open/open_labels.xlsx`), в git он не попадает.
+Два окна PowerShell (не закрывать, пока сервис нужен):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1          # llama-server (Qwen3-VL-8B) + API/UI на 127.0.0.1:8000
+powershell -ExecutionPolicy Bypass -File scripts\tunnel_ngrok.ps1   # публичный адрес https://fiddling-uncheck-decency.ngrok-free.dev
+```
+
+UI: `http://localhost:8000/` (публично — адрес туннеля). Нужна видеокарта с 8 ГБ: перед запуском закрыть
+игры и другие программы, занимающие видеопамять. Датасет положить в `open/` (`open/videos/*.mov`,
+`open/open_labels.xlsx`), в git он не попадает. Документация к сдаче: [docs/submission.md](docs/submission.md).
 
 ## API
 
