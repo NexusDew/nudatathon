@@ -1,4 +1,4 @@
-# Запуск сервиса одной командой: llama-server (VLM) + API.
+﻿# Запуск сервиса одной командой: llama-server (VLM) + API.
 #   powershell -ExecutionPolicy Bypass -File scripts\start.ps1 [-Model 4b|8b] [-Port 8000]
 param(
     [ValidateSet("4b", "8b")] [string]$Model = "8b",

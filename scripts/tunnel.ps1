@@ -1,4 +1,4 @@
-# Публичный URL для жюри через Cloudflare quick tunnel (без аккаунта).
+﻿# Публичный URL для жюри через Cloudflare quick tunnel (без аккаунта).
 #   powershell -ExecutionPolicy Bypass -File scripts\tunnel.ps1 [-Port 8000]
 # ВАЖНО: адрес *.trycloudflare.com меняется при каждом перезапуске туннеля — после сдачи не перезапускать.
 param([int]$Port = 8000)
